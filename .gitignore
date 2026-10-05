@@ -1,0 +1,83 @@
+# ============================================================
+# 20 Newsgroups IR Project  –  .gitignore
+# ============================================================
+
+# -----------------------------------------------------------
+# Raw dataset – must NEVER be committed
+# -----------------------------------------------------------
+archive.zip
+*.zip
+
+# -----------------------------------------------------------
+# Generated / large processed data artefacts
+# The parquet file is large (~10 MB) and regenerable – keep out of Git.
+# metadata.json and README.md inside data/processed/ ARE committed.
+# -----------------------------------------------------------
+data/processed/processed_documents.parquet
+data/processed/*.parquet
+
+# Legacy patterns (kept for safety)
+data/processed_corpus.pkl
+data/*.pkl
+
+# -----------------------------------------------------------
+# Model / embedding caches (teammates' modules)
+# -----------------------------------------------------------
+models/
+*.bin
+*.pt
+*.pth
+*.onnx
+sentence_transformers_cache/
+transformers_cache/
+__pycache__/huggingface/
+.cache/
+
+# -----------------------------------------------------------
+# Python artefacts
+# -----------------------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+
+# -----------------------------------------------------------
+# Virtual environments
+# -----------------------------------------------------------
+.venv/
+venv/
+env/
+.virtualenv/
+
+# -----------------------------------------------------------
+# Test / coverage outputs
+# -----------------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+
+# -----------------------------------------------------------
+# Jupyter
+# -----------------------------------------------------------
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# -----------------------------------------------------------
+# IDE / editor files
+# -----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
