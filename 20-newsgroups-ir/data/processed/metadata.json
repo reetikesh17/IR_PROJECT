@@ -1,6 +1,6 @@
 {
   "preprocessing_version": "1.0.0",
-  "generated_at": "2026-10-05T16:23:49.104845+00:00",
+  "generated_at": "2026-10-05T16:53:44.738648+00:00",
   "archive_used": "D:\\Project-ir\\archive.zip",
   "num_documents": 37588,
   "num_categories": 20,
@@ -77,5 +77,5 @@
   ],
   "parquet_file": "processed_documents.parquet",
   "parquet_size_bytes": 51228071,
-  "build_duration_s": 73.73
+  "build_duration_s": 76.72
 }

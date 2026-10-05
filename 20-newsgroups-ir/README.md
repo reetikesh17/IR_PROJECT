@@ -281,28 +281,65 @@ Expected result: **47 passed** in ~12 seconds.
 
 ---
 
-## .gitignore Recommendation
+## TF-IDF Retrieval Module — `src/tfidf.py`
 
-Add the following to prevent the dataset from being committed:
+**Author:** Reetikesh Choudhury
 
-```gitignore
-# Raw dataset – do not commit
-archive.zip
-*.zip
+### Overview
 
-# Python artifacts
-__pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
-*.egg-info/
-dist/
-build/
+Provides a high-performance TF-IDF vector retrieval engine with cosine similarity ranking.
 
-# Data outputs
-data/processed_corpus.pkl
-data/*.pkl
+### Quick Start for Teammates
 
-# Notebooks
-.ipynb_checkpoints/
+```python
+from src.tfidf import build_tfidf, search_tfidf, get_document, load_processed_dataset
+
+# 1. Build index (automatically loads processed dataset if documents argument omitted)
+build_tfidf()
+
+# 2. Perform search
+results = search_tfidf("space exploration", top_k=10)
+
+# 3. Retrieve document details
+top_doc = get_document(results[0]["doc_id"])
+print(top_doc["category"], top_doc["text"])
 ```
+
+### Output Schema
+
+`search_tfidf()` returns a list of dictionaries adhering strictly to the shared contract:
+
+```json
+[
+    {
+        "doc_id": 27983,
+        "score": 0.361942,
+        "rank": 1
+    }
+]
+```
+
+### Module Public API
+
+| Function / Class | Description |
+|---|---|
+| `build_tfidf(documents=None)` | Fits vectorizer on corpus & sets up global search index |
+| `search_tfidf(query, top_k=10)` | Queries TF-IDF index & returns ranked `[{doc_id, score, rank}]` |
+| `load_processed_dataset()` | Loads `data/processed/processed_documents.parquet` into a DataFrame |
+| `get_document(doc_id)` | Returns complete record `{doc_id, category, text, clean_text, label, split}` |
+| `TFIDFSearcher` | Class managing vectorizer, sparse matrix, and disk persistence (`save`/`load`) |
+
+---
+
+## Running the Tests
+
+```powershell
+# Run all tests
+pytest tests/ -v
+
+# Run TF-IDF unit tests specifically
+pytest tests/test_tfidf.py -v
+```
+
+Total test count: **238 passed**.
+

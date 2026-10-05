@@ -110,7 +110,7 @@ check("label range 0-19",          bool(df["label"].between(0, 19).all()))
 check("no null categories",        int(df["category"].isna().sum()) == 0)
 check("no null labels",            int(df["label"].isna().sum()) == 0)
 bad_label = df[df.apply(lambda r: CATEGORIES[r["label"]] != r["category"], axis=1)]
-check("label ↔ category consistent",
+check("label <-> category consistent",
       len(bad_label) == 0,
       f"{len(bad_label)} mismatches")
 
@@ -218,7 +218,7 @@ from preprocessing import preprocess_documents
 proc1 = preprocess_documents(docs_small)
 proc2 = preprocess_documents(docs_small)
 elapsed = time.perf_counter() - t0
-check("same input → same clean_text (deterministic)",
+check("same input -> same clean_text (deterministic)",
       all(a["clean_text"] == b["clean_text"] for a, b in zip(proc1, proc2)))
 print(f"  Determinism verified in {elapsed:.2f}s")
 
@@ -228,13 +228,13 @@ print(SEP)
 print("  12. .GITIGNORE SAFETY")
 print(SEP)
 import subprocess
+repo_root = PARQUET_FILE.parents[3]
+rel_parquet = str(PARQUET_FILE.relative_to(repo_root))
+rel_archive = str(ARCHIVE_PATH.relative_to(repo_root)) if ARCHIVE_PATH.is_relative_to(repo_root) else "archive.zip"
 result = subprocess.run(
-    ["git", "check-ignore", "-v",
-     str(PARQUET_FILE),
-     str(ARCHIVE_PATH),
-    ],
+    ["git", "check-ignore", "-v", rel_parquet, rel_archive],
     capture_output=True, text=True,
-    cwd=str(PARQUET_FILE.parents[3]),
+    cwd=str(repo_root),
 )
 output = result.stdout + result.stderr
 print(f"  git check-ignore output:\n    {output.strip().replace(chr(10), chr(10)+'    ')}")

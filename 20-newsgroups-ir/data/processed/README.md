@@ -56,7 +56,7 @@ train = table.filter(pc.equal(table['split'], 'train'))
 | Empty clean_text | 64 |
 | Avg clean tokens | 96.57 |
 | Preprocessing version | `1.0.0` |
-| Generated at | 2026-10-05T16:23:49.104845+00:00 |
+| Generated at | 2026-10-05T16:53:44.738648+00:00 |
 
 ## Preprocessing pipeline
 

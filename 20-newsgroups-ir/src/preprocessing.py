@@ -361,7 +361,7 @@ def preprocess_documents(
     for i, doc in enumerate(documents):
         results.append(preprocess_document(doc))
         if verbose and (i + 1) % 5_000 == 0:
-            print(f"  Preprocessed {i + 1:,} documents …", flush=True)
+            print(f"  Preprocessed {i + 1:,} documents ...", flush=True)
     return results
 
 

@@ -123,7 +123,7 @@ def build_processed_dataset(
     # Step 1 – Load raw corpus
     # ------------------------------------------------------------------
     if verbose:
-        print(f"[1/3] Loading corpus from {archive} …", flush=True)
+        print(f"[1/3] Loading corpus from {archive} ...", flush=True)
 
     docs = load_dataset(
         archive_path=archive,
@@ -143,7 +143,7 @@ def build_processed_dataset(
     # Step 2 – Preprocess
     # ------------------------------------------------------------------
     if verbose:
-        print("[2/3] Preprocessing …", flush=True)
+        print("[2/3] Preprocessing ...", flush=True)
 
     processed = preprocess_documents(docs, verbose=verbose)
 
@@ -156,7 +156,7 @@ def build_processed_dataset(
     # Step 3 – Serialise to parquet
     # ------------------------------------------------------------------
     if verbose:
-        print(f"[3/3] Writing parquet → {parquet_out} …", flush=True)
+        print(f"[3/3] Writing parquet -> {parquet_out} ...", flush=True)
 
     df = pd.DataFrame(processed, columns=PROCESSED_COLUMNS)
 
@@ -354,7 +354,7 @@ def verify_processed_dataset(
         print(f"  doc_id contiguous : {report['doc_id_contiguous']}")
         print(f"  label/cat OK      : {report['label_category_mismatches'] == 0}")
         print(f"  empty text        : {report['empty_text_count']}")
-        print("  ALL CHECKS PASSED ✓")
+        print("  ALL CHECKS PASSED [OK]")
         print("=" * 50)
 
     return report

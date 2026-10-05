@@ -424,6 +424,41 @@ def load_dataframe(
     return df
 
 
+def load_processed_dataset(parquet_path: Optional[str | Path] = None) -> "pd.DataFrame":
+    """
+    Load the common processed dataset parquet artifact.
+
+    Columns: ``doc_id``, ``text``, ``clean_text``, ``label``, ``category``, ``split``.
+
+    Parameters
+    ----------
+    parquet_path : str or Path, optional
+        Path to ``processed_documents.parquet``. Defaults to ``utils.PARQUET_FILE``.
+
+    Returns
+    -------
+    pandas.DataFrame
+    """
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise ImportError("pandas is required for load_processed_dataset().") from exc
+
+    if parquet_path is not None:
+        path = Path(parquet_path)
+    else:
+        from utils import PARQUET_FILE
+        path = PARQUET_FILE
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Processed dataset parquet file not found at '{path}'.\n"
+            "Run 'python src/build_dataset.py' to generate it."
+        )
+
+    return pd.read_parquet(path, engine="pyarrow")
+
+
 def dataset_info(archive_path: Optional[str | Path] = None) -> dict:
     """
     Return a summary dictionary describing the dataset without loading all text.
