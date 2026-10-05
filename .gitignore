@@ -15,10 +15,15 @@ archive.zip
 # -----------------------------------------------------------
 data/processed/processed_documents.parquet
 data/processed/*.parquet
+20-newsgroups-ir/data/processed/processed_documents.parquet
+20-newsgroups-ir/data/processed/*.parquet
+**/data/processed/*.parquet
+*.parquet
 
 # Legacy patterns (kept for safety)
 data/processed_corpus.pkl
 data/*.pkl
+**/data/*.pkl
 
 # -----------------------------------------------------------
 # Model / embedding caches (teammates' modules)
