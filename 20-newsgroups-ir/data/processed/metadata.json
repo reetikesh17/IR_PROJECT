@@ -1,0 +1,81 @@
+{
+  "preprocessing_version": "1.0.0",
+  "generated_at": "2026-10-05T16:23:49.104845+00:00",
+  "archive_used": "D:\\Project-ir\\archive.zip",
+  "num_documents": 37588,
+  "num_categories": 20,
+  "splits_included": [
+    "test",
+    "train"
+  ],
+  "include_unstructured": false,
+  "empty_clean_text_count": 64,
+  "avg_clean_tokens": 96.57,
+  "columns": [
+    "doc_id",
+    "text",
+    "clean_text",
+    "label",
+    "category",
+    "split"
+  ],
+  "dtypes": {
+    "doc_id": "int32",
+    "text": "string",
+    "clean_text": "string",
+    "label": "int8",
+    "category": "category",
+    "split": "category"
+  },
+  "split_counts": {
+    "test": 18794,
+    "train": 18794
+  },
+  "category_counts": {
+    "alt.atheism": 1596,
+    "comp.graphics": 1942,
+    "comp.os.ms-windows.misc": 1960,
+    "comp.sys.ibm.pc.hardware": 1958,
+    "comp.sys.mac.hardware": 1914,
+    "comp.windows.x": 1956,
+    "misc.forsale": 1926,
+    "rec.autos": 1976,
+    "rec.motorcycles": 1986,
+    "rec.sport.baseball": 1986,
+    "rec.sport.hockey": 1996,
+    "sci.crypt": 1982,
+    "sci.electronics": 1962,
+    "sci.med": 1976,
+    "sci.space": 1972,
+    "soc.religion.christian": 1994,
+    "talk.politics.guns": 1820,
+    "talk.politics.mideast": 1880,
+    "talk.politics.misc": 1550,
+    "talk.religion.misc": 1256
+  },
+  "categories": [
+    "alt.atheism",
+    "comp.graphics",
+    "comp.os.ms-windows.misc",
+    "comp.sys.ibm.pc.hardware",
+    "comp.sys.mac.hardware",
+    "comp.windows.x",
+    "misc.forsale",
+    "rec.autos",
+    "rec.motorcycles",
+    "rec.sport.baseball",
+    "rec.sport.hockey",
+    "sci.crypt",
+    "sci.electronics",
+    "sci.med",
+    "sci.space",
+    "soc.religion.christian",
+    "talk.politics.guns",
+    "talk.politics.mideast",
+    "talk.politics.misc",
+    "talk.religion.misc"
+  ],
+  "parquet_file": "processed_documents.parquet",
+  "parquet_size_bytes": 51228071,
+  "build_duration_s": 73.73
+}

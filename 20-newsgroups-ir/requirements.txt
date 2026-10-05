@@ -1,0 +1,30 @@
+# ============================================================
+# 20 Newsgroups IR Project – Python dependencies
+# Python >= 3.10 required
+# Install:  pip install -r requirements.txt
+# ============================================================
+
+# --- Reetikesh's modules (data loading, preprocessing, TF-IDF) ---
+numpy==2.2.6
+pandas==2.2.3
+scikit-learn==1.6.1
+nltk==3.9.1
+pyarrow==20.0.0       # parquet read/write for shared processed dataset
+
+# --- Testing ---
+pytest==8.3.5
+pytest-cov==6.1.0
+
+# --- Notebook support ---
+ipykernel==6.29.5
+jupyter==1.1.1
+matplotlib==3.10.3
+seaborn==0.13.2
+
+# --- Teammates' modules (placeholders – do not remove) ---
+# BM25
+rank-bm25==0.2.2
+# Semantic search
+sentence-transformers==3.4.1
+# Streamlit UI
+streamlit==1.44.1
