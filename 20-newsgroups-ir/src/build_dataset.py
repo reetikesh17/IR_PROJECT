@@ -8,22 +8,36 @@ Module : Dataset Build Pipeline (own component)
 
 This script is the single entry point for creating the shared artifact that
 all teammates (Srijan – BM25, Vidur – Semantic Search / RRF) consume.
-Running it always produces an identical result on the same machine because:
+Running it always produces an identical result because:
 
-  • ``data_loader.load_dataset()`` is deterministic (sorted category order,
-    fixed regex parsing).
+  • ``data_loader.load_dataset()`` is deterministic (fixed category order,
+    consistent tarball iteration).
   • ``preprocessing.preprocess_documents()`` is deterministic (module-level
     PorterStemmer + frozenset stopwords, no randomness).
-  • ``doc_id`` values are re-indexed to a contiguous 0-based range that is
-    stable across categories within a single run, and the same ordering is
-    reproduced on every run because the category list order never changes.
+  • The 80/20 train/test split uses ``random_state=42`` and ``stratify=labels``
+    so results are fully reproducible across runs and machines.
+
+Data Flow (correct order – no leakage)
+---------------------------------------
+  1.  Load all documents from ``twenty+newsgroups.zip``
+  2.  Basic text cleaning / preprocessing  → adds ``clean_text`` to each record
+  3.  Create stratified 80/20 train / test split (``train_test_split``)
+         • test_size  = 0.20
+         • random_state = 42
+         • stratify   = category labels
+  4.  Assign ``split`` key (``"train"`` / ``"test"``) to each record
+  5.  Serialise to parquet
+
+The TF-IDF vectorizer (step 4 in the broader IR pipeline) is fitted ONLY
+on training documents after this parquet is built.  The test documents are
+kept entirely separate until evaluation time.
 
 Output
 ------
 ``data/processed/processed_documents.parquet``
     Apache Parquet file readable by pandas, PyArrow, Polars, etc.
     Columns: doc_id, text, clean_text, label, category, split
-    ~37 500 rows (train + test; unstructured excluded by default).
+    ~19,997 rows (no unstructured docs; split by sklearn).
 
 ``data/processed/metadata.json``
     Lightweight JSON committed to Git that describes the artifact so
@@ -35,9 +49,7 @@ Output
 Usage
 -----
     python src/build_dataset.py                       # default settings
-    python src/build_dataset.py --archive /path/to/archive.zip
-    python src/build_dataset.py --include-unstructured
-    python src/build_dataset.py --splits train        # train only
+    python src/build_dataset.py --archive /path/to/twenty+newsgroups.zip
     python src/build_dataset.py --out-dir /custom/dir
     python src/build_dataset.py --verify-only         # reload & check, no rebuild
 """
@@ -80,23 +92,27 @@ def build_processed_dataset(
     archive_path: Optional[str | Path] = None,
     *,
     out_dir: Optional[str | Path] = None,
-    splits: Optional[List[str]] = None,
-    include_unstructured: bool = False,
     verbose: bool = True,
 ) -> Path:
     """
     Run the full pipeline and write the processed parquet file.
 
+    Pipeline
+    --------
+    1. Load all documents from the archive (no split yet).
+    2. Preprocess all documents (adds ``clean_text``).
+    3. Create stratified 80/20 split with ``train_test_split``.
+    4. Assign ``split`` column (``"train"`` / ``"test"``).
+    5. Serialise to parquet + write metadata.json + README.md.
+
     Parameters
     ----------
     archive_path : str or Path, optional
-        Path to ``archive.zip``. Defaults to ``utils.ARCHIVE_PATH``.
+        Path to ``twenty+newsgroups.zip``.
+        Defaults to ``utils.ARCHIVE_PATH``.
     out_dir : str or Path, optional
-        Directory to write output files. Defaults to ``utils.PROCESSED_DATA_DIR``.
-    splits : list of str, optional
-        Which splits to include. Defaults to ``["train", "test"]``.
-    include_unstructured : bool, default False
-        Include the ~1 600 header-less documents.
+        Directory to write output files.
+        Defaults to ``utils.PROCESSED_DATA_DIR``.
     verbose : bool, default True
         Print progress messages.
 
@@ -106,6 +122,7 @@ def build_processed_dataset(
         Absolute path to the written parquet file.
     """
     import pandas as pd
+    from sklearn.model_selection import train_test_split
 
     archive = Path(archive_path) if archive_path else ARCHIVE_PATH
     out = Path(out_dir) if out_dir else PROCESSED_DATA_DIR
@@ -115,35 +132,33 @@ def build_processed_dataset(
     metadata_out = out / "metadata.json"
     readme_out   = out / "README.md"
 
-    target_splits = splits if splits is not None else ["train", "test"]
-
     t0 = time.perf_counter()
 
     # ------------------------------------------------------------------
-    # Step 1 – Load raw corpus
+    # Step 1 – Load raw corpus (all documents, no split key yet)
     # ------------------------------------------------------------------
     if verbose:
-        print(f"[1/3] Loading corpus from {archive} ...", flush=True)
+        print(f"[1/4] Loading corpus from {archive} ...", flush=True)
 
     docs = load_dataset(
         archive_path=archive,
-        splits=target_splits,
-        include_unstructured=include_unstructured,
-        strip_headers=True,   # remove From:/Subject: before preprocessing
+        strip_headers=True,   # remove From:/Subject:/etc. before preprocessing
     )
     n_loaded = len(docs)
     if verbose:
-        split_counts = {}
-        for d in docs:
-            split_counts[d["split"]] = split_counts.get(d["split"], 0) + 1
-        print(f"     Loaded {n_loaded:,} documents  "
-              f"({', '.join(f'{v:,} {k}' for k, v in sorted(split_counts.items()))})")
+        from collections import Counter
+        cat_counts = Counter(d["category"] for d in docs)
+        print(f"     Loaded {n_loaded:,} documents across {len(cat_counts)} categories")
 
     # ------------------------------------------------------------------
-    # Step 2 – Preprocess
+    # Step 2 – Preprocess ALL documents (clean_text added)
+    # NOTE: No vectorizer is fitted here.  Preprocessing is purely
+    # token-level (header removal, lowercase, stopwords, stemming) and
+    # does NOT look at corpus-level statistics, so it is safe to apply
+    # to all documents before splitting.
     # ------------------------------------------------------------------
     if verbose:
-        print("[2/3] Preprocessing ...", flush=True)
+        print("[2/4] Preprocessing ...", flush=True)
 
     processed = preprocess_documents(docs, verbose=verbose)
 
@@ -153,19 +168,70 @@ def build_processed_dataset(
     assert sorted(ids) == list(range(len(ids))), "doc_ids are not contiguous 0-based"
 
     # ------------------------------------------------------------------
-    # Step 3 – Serialise to parquet
+    # Step 3 – Create stratified 80/20 train/test split
+    # This happens AFTER preprocessing but BEFORE any TF-IDF fitting.
+    # The vectorizer will be fitted only on the train subset (in tfidf.py).
     # ------------------------------------------------------------------
     if verbose:
-        print(f"[3/3] Writing parquet -> {parquet_out} ...", flush=True)
+        print("[3/4] Creating stratified 80/20 train/test split ...", flush=True)
 
-    df = pd.DataFrame(processed, columns=PROCESSED_COLUMNS)
+    labels = [d["label"] for d in processed]
+
+    train_docs, test_docs = train_test_split(
+        processed,
+        test_size=0.20,
+        random_state=42,
+        stratify=labels,
+    )
+
+    n_train = len(train_docs)
+    n_test  = len(test_docs)
+
+    if verbose:
+        print(f"     Total documents   : {n_loaded:,}")
+        print(f"     Training documents: {n_train:,}  "
+              f"({100 * n_train / n_loaded:.1f}%)")
+        print(f"     Testing documents : {n_test:,}  "
+              f"({100 * n_test / n_loaded:.1f}%)")
+
+        # Print category distribution to verify stratification
+        from collections import Counter
+        train_cats = Counter(d["category"] for d in train_docs)
+        test_cats  = Counter(d["category"] for d in test_docs)
+        print()
+        print(f"     {'Category':<35} {'Train':>6}  {'Test':>6}  {'Total':>6}")
+        print(f"     {'-'*35} {'-'*6}  {'-'*6}  {'-'*6}")
+        for cat in CATEGORIES:
+            tr = train_cats.get(cat, 0)
+            te = test_cats.get(cat, 0)
+            print(f"     {cat:<35} {tr:>6}  {te:>6}  {tr+te:>6}")
+
+    # Assign the ``split`` key and re-index doc_ids contiguously
+    # (train first, then test — stable ordering for downstream consumers)
+    for doc in train_docs:
+        doc["split"] = "train"
+    for doc in test_docs:
+        doc["split"] = "test"
+
+    # Merge back and re-index: train docs first, then test docs
+    all_docs = train_docs + test_docs
+    for new_id, doc in enumerate(all_docs):
+        doc["doc_id"] = new_id
+
+    # ------------------------------------------------------------------
+    # Step 4 – Serialise to parquet
+    # ------------------------------------------------------------------
+    if verbose:
+        print(f"[4/4] Writing parquet -> {parquet_out} ...", flush=True)
+
+    df = pd.DataFrame(all_docs, columns=PROCESSED_COLUMNS)
 
     # Enforce dtypes for space-efficiency and portability
-    df["doc_id"]   = df["doc_id"].astype("int32")
-    df["label"]    = df["label"].astype("int8")
-    df["category"] = df["category"].astype("category")
-    df["split"]    = df["split"].astype("category")
-    df["text"]     = df["text"].astype("string")
+    df["doc_id"]     = df["doc_id"].astype("int32")
+    df["label"]      = df["label"].astype("int8")
+    df["category"]   = df["category"].astype("category")
+    df["split"]      = df["split"].astype("category")
+    df["text"]       = df["text"].astype("string")
     df["clean_text"] = df["clean_text"].astype("string")
 
     df.to_parquet(parquet_out, index=False, engine="pyarrow", compression="snappy")
@@ -196,8 +262,12 @@ def build_processed_dataset(
         "archive_used": str(archive),
         "num_documents": int(len(df)),
         "num_categories": int(df["category"].nunique()),
-        "splits_included": sorted(target_splits),
-        "include_unstructured": include_unstructured,
+        "split_method": "sklearn.model_selection.train_test_split",
+        "split_params": {
+            "test_size": 0.20,
+            "random_state": 42,
+            "stratify": "label",
+        },
         "empty_clean_text_count": empty_clean,
         "avg_clean_tokens": round(avg_clean_tokens, 2),
         "columns": PROCESSED_COLUMNS,
@@ -229,18 +299,31 @@ def build_processed_dataset(
         print()
         print("=" * 60)
         print("  BUILD COMPLETE")
-        print(f"  Documents   : {len(df):,}")
-        print(f"  Categories  : {df['category'].nunique()}")
+        print(f"  Total documents : {len(df):,}")
+        print(f"  Categories      : {df['category'].nunique()}")
         train_n = split_info.get("train", 0)
-        test_n  = split_info.get("test", 0)
-        print(f"  Train / Test: {train_n:,} / {test_n:,}")
-        print(f"  Empty clean : {empty_clean:,}")
-        print(f"  Avg tokens  : {avg_clean_tokens:.1f}")
-        print(f"  Parquet     : {parquet_out}  "
+        test_n  = split_info.get("test",  0)
+        print(f"  Train           : {train_n:,}  "
+              f"({100 * train_n / len(df):.1f}%)")
+        print(f"  Test            : {test_n:,}  "
+              f"({100 * test_n / len(df):.1f}%)")
+        print(f"  Split method    : stratified train_test_split "
+              f"(test_size=0.20, random_state=42)")
+        print(f"  Empty clean     : {empty_clean:,}")
+        print(f"  Avg tokens      : {avg_clean_tokens:.1f}")
+        print(f"  Parquet         : {parquet_out}  "
               f"({parquet_out.stat().st_size / 1_048_576:.1f} MB)")
-        print(f"  Metadata    : {metadata_out}")
-        print(f"  Elapsed     : {elapsed:.1f}s")
+        print(f"  Metadata        : {metadata_out}")
+        print(f"  Elapsed         : {elapsed:.1f}s")
         print("=" * 60)
+        print()
+        print("IMPORTANT – Data Leakage Note:")
+        print("  The TF-IDF vectorizer must be fitted ONLY on training")
+        print("  documents (split == 'train').  Use the train subset when")
+        print("  calling build_tfidf() in tfidf.py:")
+        print("    df = load_processed_dataset()")
+        print("    train_df = df[df['split'] == 'train']")
+        print("    searcher = build_tfidf(train_df)")
 
     return parquet_out
 
@@ -260,7 +343,7 @@ def verify_processed_dataset(
     Returns a dict with check results.  Raises ``AssertionError`` if any
     critical invariant is violated.
 
-    Teammates can call this to confirm their environment can read the file:
+    Teammates can call this to confirm their environment can read the file::
 
         python -c "
         import sys; sys.path.insert(0, 'src')
@@ -270,235 +353,212 @@ def verify_processed_dataset(
     """
     import pandas as pd
 
-    path = Path(parquet_path) if parquet_path else PARQUET_FILE
+    if parquet_path is not None:
+        path = Path(parquet_path)
+    else:
+        path = PARQUET_FILE
 
     if not path.exists():
         raise FileNotFoundError(
-            f"Processed dataset not found at '{path}'.\n"
-            "Run:  python src/build_dataset.py"
+            f"Parquet file not found at '{path}'.\n"
+            "Run 'python src/build_dataset.py' first."
         )
 
+    if verbose:
+        print(f"Verifying {path} ...")
+
     df = pd.read_parquet(path, engine="pyarrow")
-    report: dict = {}
+    results: dict = {}
 
-    # 1. Required columns
-    missing_cols = set(PROCESSED_COLUMNS) - set(df.columns)
-    report["missing_columns"] = list(missing_cols)
-    assert not missing_cols, f"Missing columns: {missing_cols}"
+    # Check 1 – required columns
+    required = set(PROCESSED_COLUMNS)
+    missing = required - set(df.columns)
+    results["columns_ok"] = len(missing) == 0
+    assert not missing, f"Missing columns: {missing}"
 
-    # 2. Row count
-    report["num_rows"] = len(df)
-    assert len(df) > 0, "Parquet file is empty"
+    # Check 2 – row count > 0
+    results["has_rows"] = len(df) > 0
+    assert len(df) > 0, "Empty parquet file"
 
-    # 3. doc_id uniqueness and contiguity
+    # Check 3 – doc_id unique and contiguous 0-based
     ids = df["doc_id"].tolist()
-    report["doc_id_unique"] = len(ids) == len(set(ids))
-    assert report["doc_id_unique"], "doc_ids are not unique"
-    report["doc_id_contiguous"] = sorted(ids) == list(range(len(ids)))
-    assert report["doc_id_contiguous"], "doc_ids are not contiguous 0-based"
+    results["doc_ids_unique"] = len(ids) == len(set(ids))
+    results["doc_ids_contiguous"] = sorted(ids) == list(range(len(ids)))
+    assert results["doc_ids_unique"],    "doc_ids are not unique"
+    assert results["doc_ids_contiguous"], "doc_ids are not contiguous 0-based"
 
-    # 4. No null doc_id / label / category / split
-    for col in ("doc_id", "label", "category", "split"):
-        null_count = int(df[col].isna().sum())
-        report[f"null_{col}"] = null_count
-        assert null_count == 0, f"Column '{col}' has {null_count} nulls"
+    # Check 4 – no nulls in key columns
+    for col in ["doc_id", "label", "category", "split"]:
+        null_n = int(df[col].isnull().sum())
+        results[f"no_null_{col}"] = null_n == 0
+        assert null_n == 0, f"Column '{col}' has {null_n} null values"
 
-    # 5. No empty raw text
-    empty_text = int((df["text"].fillna("").str.strip() == "").sum())
-    report["empty_text_count"] = empty_text
-    assert empty_text == 0, f"{empty_text} rows have empty 'text'"
+    # Check 5 – all 20 categories present
+    cats = set(df["category"].unique())
+    results["all_categories_present"] = cats == set(CATEGORIES)
+    assert cats == set(CATEGORIES), f"Missing categories: {set(CATEGORIES) - cats}"
 
-    # 6. All 20 categories present
-    found_cats = set(df["category"].unique())
-    report["num_categories"] = len(found_cats)
-    assert len(found_cats) == 20, f"Expected 20 categories, got {len(found_cats)}"
+    # Check 6 – labels in [0, 19]
+    label_min = int(df["label"].min())
+    label_max = int(df["label"].max())
+    results["labels_in_range"] = label_min == 0 and label_max == 19
+    assert label_min == 0 and label_max == 19, \
+        f"Labels out of range: min={label_min}, max={label_max}"
 
-    # 7. Labels in [0, 19]
-    label_range_ok = bool(df["label"].between(0, 19).all())
-    report["labels_in_range"] = label_range_ok
-    assert label_range_ok, "Some labels are outside [0, 19]"
+    # Check 7 – split values are only "train" / "test"
+    split_vals = set(df["split"].unique())
+    results["valid_splits"] = split_vals <= {"train", "test"}
+    assert split_vals <= {"train", "test"}, f"Unexpected split values: {split_vals}"
 
-    # 8. label ↔ category consistency
-    from data_loader import CATEGORIES as _CATS
-    bad_label = df[df.apply(
-        lambda r: _CATS[r["label"]] != r["category"], axis=1
-    )]
-    report["label_category_mismatches"] = len(bad_label)
-    assert len(bad_label) == 0, f"{len(bad_label)} label/category mismatches"
-
-    # 9. clean_text is string
-    assert df["clean_text"].dtype == object or str(df["clean_text"].dtype) in (
-        "string", "StringDtype"
-    ), "clean_text column is not string type"
-    report["clean_text_dtype_ok"] = True
-
-    # 10. Splits are only valid values
-    valid_splits = {"train", "test", "unstructured"}
-    bad_splits = set(df["split"].unique()) - valid_splits
-    report["invalid_splits"] = list(bad_splits)
-    assert not bad_splits, f"Unknown split values: {bad_splits}"
-
-    report["all_checks_passed"] = True
+    # Check 8 – 80/20 ratio (allow ±2% tolerance)
+    n = len(df)
+    train_n = int((df["split"] == "train").sum())
+    test_n  = int((df["split"] == "test").sum())
+    train_pct = train_n / n
+    test_pct  = test_n  / n
+    results["train_pct"] = round(train_pct * 100, 2)
+    results["test_pct"]  = round(test_pct  * 100, 2)
+    assert 0.78 <= train_pct <= 0.82, \
+        f"Training percentage {train_pct:.1%} outside expected 78–82% band"
+    assert 0.18 <= test_pct  <= 0.22, \
+        f"Testing percentage {test_pct:.1%} outside expected 18–22% band"
 
     if verbose:
-        print("=" * 50)
-        print("  PROCESSED DATASET VERIFICATION")
-        print(f"  File     : {path}")
-        print(f"  Rows     : {report['num_rows']:,}")
-        print(f"  Cols     : {list(df.columns)}")
-        print(f"  Categories: {report['num_categories']}")
-        splits_found = df["split"].value_counts().to_dict()
-        for sp, cnt in sorted(splits_found.items()):
-            print(f"  {sp:<15}: {cnt:,}")
-        print(f"  doc_id unique     : {report['doc_id_unique']}")
-        print(f"  doc_id contiguous : {report['doc_id_contiguous']}")
-        print(f"  label/cat OK      : {report['label_category_mismatches'] == 0}")
-        print(f"  empty text        : {report['empty_text_count']}")
-        print("  ALL CHECKS PASSED [OK]")
-        print("=" * 50)
+        print(f"  Total documents : {n:,}")
+        print(f"  Train           : {train_n:,}  ({train_pct:.1%})")
+        print(f"  Test            : {test_n:,}  ({test_pct:.1%})")
+        print(f"  Categories      : {len(cats)}")
+        print("  All checks PASSED.")
 
-    return report
+    results["total"] = n
+    results["train_n"] = train_n
+    results["test_n"]  = test_n
+    return results
 
 
 # ---------------------------------------------------------------------------
 # README writer
 # ---------------------------------------------------------------------------
 
-def _write_data_readme(path: Path, meta: dict) -> None:
+def _write_data_readme(path: Path, metadata: dict) -> None:
+    """Write a human-readable README.md for the data/processed/ directory."""
+    train_n = metadata["split_counts"].get("train", 0)
+    test_n  = metadata["split_counts"].get("test",  0)
+    total   = metadata["num_documents"]
+
     lines = [
-        "# 20 Newsgroups — Processed Dataset",
+        "# Processed Dataset",
         "",
-        "> **This directory is generated automatically.**  "
-        "Do NOT commit `processed_documents.parquet` to Git.",
-        "> Only `metadata.json` and `README.md` are tracked.",
-        "> To regenerate, run: `python src/build_dataset.py`",
+        "This directory contains the shared processed dataset for the",
+        "20 Newsgroups IR project.",
         "",
         "## Files",
         "",
-        "| File | In Git | Description |",
-        "|---|---|---|",
-        "| `processed_documents.parquet` | ❌ | Full processed corpus (~37 500 rows) |",
-        "| `metadata.json` | ✅ | Dataset description and stats |",
-        "| `README.md` | ✅ | This file |",
+        "| File | Description |",
+        "|------|-------------|",
+        "| `processed_documents.parquet` | Full preprocessed corpus (Snappy-compressed Parquet) |",
+        "| `metadata.json` | Dataset statistics and build parameters |",
+        "| `README.md` | This file |",
         "",
-        "## Quick-start (pandas)",
+        "## Dataset Statistics",
         "",
+        f"| Stat | Value |",
+        f"|------|-------|",
+        f"| Total documents | {total:,} |",
+        f"| Training documents | {train_n:,} (~80%) |",
+        f"| Testing documents | {test_n:,} (~20%) |",
+        f"| Categories | {metadata['num_categories']} |",
+        f"| Avg clean tokens | {metadata['avg_clean_tokens']} |",
+        f"| Generated at | {metadata['generated_at']} |",
+        "",
+        "## Split Method",
+        "",
+        "The train/test split is created by `build_dataset.py` using:",
         "```python",
-        "import pandas as pd",
-        "",
-        "df = pd.read_parquet('data/processed/processed_documents.parquet')",
-        "print(df.shape)          # (~37500, 6)",
-        "print(df.columns.tolist())",
-        "# ['doc_id', 'text', 'clean_text', 'label', 'category', 'split']",
+        "from sklearn.model_selection import train_test_split",
+        "train_docs, test_docs = train_test_split(",
+        "    processed,",
+        "    test_size=0.20,",
+        "    random_state=42,",
+        "    stratify=labels,",
+        ")",
         "```",
         "",
-        "## Quick-start (PyArrow)",
+        "## Loading the Dataset",
         "",
         "```python",
-        "import pyarrow.parquet as pq",
+        "import sys",
+        "sys.path.insert(0, 'src')",
+        "from data_loader import load_processed_dataset",
         "",
-        "table = pq.read_table('data/processed/processed_documents.parquet')",
-        "# Filter to train split only:",
-        "import pyarrow.compute as pc",
-        "train = table.filter(pc.equal(table['split'], 'train'))",
+        "df = load_processed_dataset()",
+        "train_df = df[df['split'] == 'train']",
+        "test_df  = df[df['split'] == 'test']",
         "```",
         "",
-        "## Schema",
+        "## Columns",
         "",
         "| Column | Type | Description |",
-        "|---|---|---|",
-        "| `doc_id` | int32 | Globally unique 0-based integer |",
-        "| `text` | string | Raw document body (email headers stripped) |",
-        "| `clean_text` | string | Preprocessed text: lowercase stemmed tokens |",
-        "| `label` | int8 | Numeric class label 0–19 |",
-        "| `category` | category | Newsgroup name e.g. `alt.atheism` |",
-        "| `split` | category | `train` or `test` |",
+        "|--------|------|-------------|",
+        "| `doc_id` | int32 | Globally unique 0-based document ID |",
+        "| `text` | string | Raw document body (headers stripped) |",
+        "| `clean_text` | string | Preprocessed text (stemmed, stopwords removed) |",
+        "| `label` | int8 | Integer category label (0–19) |",
+        "| `category` | category | Newsgroup name |",
+        "| `split` | category | `\"train\"` or `\"test\"` |",
         "",
-        "## Dataset statistics",
+        "## Important: No Data Leakage",
         "",
-        f"| Statistic | Value |",
-        f"|---|---|",
-        f"| Total documents | {meta['num_documents']:,} |",
-        f"| Categories | {meta['num_categories']} |",
-        f"| Train documents | {meta['split_counts'].get('train', 0):,} |",
-        f"| Test documents | {meta['split_counts'].get('test', 0):,} |",
-        f"| Empty clean_text | {meta['empty_clean_text_count']:,} |",
-        f"| Avg clean tokens | {meta['avg_clean_tokens']} |",
-        f"| Preprocessing version | `{meta['preprocessing_version']}` |",
-        f"| Generated at | {meta['generated_at']} |",
+        "The TF-IDF vectorizer (and any other data-dependent feature extractor)",
+        "**must be fitted only on training documents**.  Always filter by split",
+        "before building an index:",
         "",
-        "## Preprocessing pipeline",
-        "",
-        "Implemented in `src/preprocessing.py`.  Steps applied in order:",
-        "",
-        "1. Residual header / metadata removal",
-        "2. Lowercase",
-        "3. Tokenisation (NLTK `word_tokenize`)",
-        "4. Stopword removal (NLTK English)",
-        "5. Stemming (Porter Stemmer)",
-        "6. Drop non-alpha / length < 2 tokens",
-        "",
-        "## Reproducing the dataset",
-        "",
-        "```bash",
-        "# From the 20-newsgroups-ir/ directory:",
-        "python src/build_dataset.py",
-        "",
-        "# With a custom archive path:",
-        "python src/build_dataset.py --archive /path/to/archive.zip",
-        "",
-        "# Verify an existing file without rebuilding:",
-        "python src/build_dataset.py --verify-only",
+        "```python",
+        "from tfidf import build_tfidf",
+        "train_df = df[df['split'] == 'train']",
+        "searcher = build_tfidf(train_df)  # fit on train only",
         "```",
-        "",
-        "The `NEWSGROUPS_ARCHIVE_PATH` environment variable can also be set.",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# CLI entry point
 # ---------------------------------------------------------------------------
 
-def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        description="Build the common processed dataset (parquet + metadata).",
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Build the processed 20 Newsgroups dataset parquet artifact.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--archive", metavar="PATH", default=None,
-                   help="Path to archive.zip")
-    p.add_argument("--out-dir", metavar="DIR", default=None,
-                   help="Output directory (default: data/processed/)")
-    p.add_argument("--splits", nargs="+", default=None,
-                   choices=["train", "test", "unstructured"],
-                   metavar="SPLIT",
-                   help="Splits to include (default: train test)")
-    p.add_argument("--include-unstructured", action="store_true", default=False,
-                   help="Also include ~1 600 header-less documents")
-    p.add_argument("--verify-only", action="store_true", default=False,
-                   help="Only verify an existing parquet; do not rebuild")
-    p.add_argument("--quiet", action="store_true", default=False,
-                   help="Suppress progress output")
-    return p
-
-
-def main(argv: list | None = None) -> None:
-    args = _build_parser().parse_args(argv)
-    verbose = not args.quiet
+    parser.add_argument(
+        "--archive",
+        default=None,
+        help="Path to twenty+newsgroups.zip.  "
+             "Defaults to NEWSGROUPS_ARCHIVE_PATH env var or "
+             "20-newsgroups-ir/twenty+newsgroups.zip.",
+    )
+    parser.add_argument(
+        "--out-dir",
+        default=None,
+        help="Output directory for parquet + metadata.  "
+             "Defaults to data/processed/.",
+    )
+    parser.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="Skip the build and only verify the existing parquet file.",
+    )
+    args = parser.parse_args()
 
     if args.verify_only:
-        out = Path(args.out_dir) if args.out_dir else PROCESSED_DATA_DIR
-        verify_processed_dataset(out / "processed_documents.parquet", verbose=verbose)
-        return
-
-    parquet_path = build_processed_dataset(
-        archive_path=args.archive,
-        out_dir=args.out_dir,
-        splits=args.splits,
-        include_unstructured=args.include_unstructured,
-        verbose=verbose,
-    )
-    verify_processed_dataset(parquet_path, verbose=verbose)
+        verify_processed_dataset(verbose=True)
+    else:
+        build_processed_dataset(
+            archive_path=args.archive,
+            out_dir=args.out_dir,
+            verbose=True,
+        )
 
 
 if __name__ == "__main__":

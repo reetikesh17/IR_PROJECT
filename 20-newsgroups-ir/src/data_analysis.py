@@ -130,19 +130,22 @@ class AnalysisResult:
 
 def analyse_dataset(
     archive_path: Optional[str | Path] = None,
-    *,
-    include_unstructured: bool = False,
 ) -> AnalysisResult:
     """
     Load the corpus and compute all 10 required statistics.
 
+    Loads from ``twenty+newsgroups.zip`` (``20_newsgroups.tar.gz`` inside).
+    No ``split`` column exists at this stage — the 80/20 train/test split
+    is created later by ``build_dataset.py``.  The ``train_count`` and
+    ``test_count`` fields of the result will both be 0; use the split
+    validation cell in ``preprocessing.ipynb`` for split statistics.
+
     Parameters
     ----------
     archive_path : str or Path, optional
-        Path to ``archive.zip``. Falls back to the default loader resolution
-        (``NEWSGROUPS_ARCHIVE_PATH`` env var, then ``../../archive.zip``).
-    include_unstructured : bool, default False
-        When True, also load the ~1 600 docs that have no structured headers.
+        Path to ``twenty+newsgroups.zip``. Falls back to the default loader
+        resolution (``NEWSGROUPS_ARCHIVE_PATH`` env var, then the zip file
+        inside the project directory).
 
     Returns
     -------
@@ -155,18 +158,15 @@ def analyse_dataset(
     t0 = time.perf_counter()
 
     # ------------------------------------------------------------------
-    # Load corpus
+    # Load corpus — new loader: no split key, no include_unstructured arg
     # ------------------------------------------------------------------
-    docs = load_dataset(
-        archive_path=archive_path,
-        include_unstructured=include_unstructured,
-    )
+    docs = load_dataset(archive_path=archive_path)
 
     result = AnalysisResult()
     result.generated_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
     result.archive_path = str(
         Path(archive_path).resolve() if archive_path
-        else Path(__file__).resolve().parents[3] / "archive.zip"
+        else Path(__file__).resolve().parents[1] / "twenty+newsgroups.zip"
     )
 
     # ------------------------------------------------------------------
@@ -180,17 +180,16 @@ def analyse_dataset(
     result.num_categories = len({d["category"] for d in docs})
 
     # ------------------------------------------------------------------
-    # 4 & 5. Train / test / unstructured counts
+    # 4 & 5. Train / test counts
+    #   The new loader does NOT assign a 'split' key — that happens in
+    #   build_dataset.py.  We set both to 0 here and note it in the report.
     # ------------------------------------------------------------------
-    split_counter: Dict[str, int] = collections.Counter(d["split"] for d in docs)
-    result.train_count        = split_counter.get("train", 0)
-    result.test_count         = split_counter.get("test", 0)
-    result.unstructured_count = split_counter.get("unstructured", 0)
+    result.train_count        = 0
+    result.test_count         = 0
+    result.unstructured_count = 0
 
     # ------------------------------------------------------------------
     # 9. Empty / null documents
-    #    load_dataset already filters empty bodies, so this is 0 for the
-    #    returned corpus. We count here for transparency / test coverage.
     # ------------------------------------------------------------------
     result.empty_null_count = sum(
         1 for d in docs if not d.get("text") or not d["text"].strip()
@@ -207,82 +206,53 @@ def analyse_dataset(
 
     # ------------------------------------------------------------------
     # 10. Duplicate documents
-    #     The dataset is deliberately structured so that every train document
-    #     has an identical twin in the test split (same category, same text,
-    #     different split tag).  Those expected train/test twins are NOT
-    #     interesting duplicates.
-    #
-    #     We report two numbers:
-    #       duplicate_count        – docs involved in ANY exact-text match
-    #       unexpected_dup_count   – docs duplicated within the SAME split, or
-    #                                across DIFFERENT categories (genuinely odd)
-    #
-    #     Strategy: hash text → group doc_ids → for each group check whether
-    #     the pair is purely a train↔test mirror (expected) or something else.
+    #   With the new archive there are no designed train/test twin pairs.
+    #   Any exact-text duplicates are genuine content duplicates.
     # ------------------------------------------------------------------
     text_to_docs: Dict[int, List[dict]] = collections.defaultdict(list)
     for d in docs:
         text_to_docs[hash(d["text"])].append(d)
 
     dup_pairs: List[dict] = []
-    total_dup_docs: set[int] = set()
-    unexpected_dup_docs: set[int] = set()
+    dup_docs: set[int] = set()
 
     for group in text_to_docs.values():
         if len(group) < 2:
             continue
 
-        # Hash collision guard: keep only docs whose text truly matches group[0].
+        # Hash collision guard
         ref_text = group[0]["text"]
         group = [d for d in group if d["text"] == ref_text]
         if len(group) < 2:
             continue
 
-        # Classify the group.
-        # An "expected" pair is exactly 2 docs: one train, one test, same category.
-        def _is_expected_twin_pair(grp: List[dict]) -> bool:
-            if len(grp) != 2:
-                return False
-            a, b = grp
-            return (
-                a["category"] == b["category"]
-                and {a["split"], b["split"]} == {"train", "test"}
-            )
-
-        is_expected = _is_expected_twin_pair(group)
-
         for d in group:
-            total_dup_docs.add(d["doc_id"])
-            if not is_expected:
-                unexpected_dup_docs.add(d["doc_id"])
+            dup_docs.add(d["doc_id"])
 
-        if not is_expected:
-            # Record unexpected pairs (capped at 100).
-            for i in range(len(group)):
-                for j in range(i + 1, len(group)):
-                    if len(dup_pairs) >= 100:
-                        break
-                    a, b = group[i], group[j]
-                    dup_pairs.append({
-                        "doc_id_a": a["doc_id"],
-                        "doc_id_b": b["doc_id"],
-                        "category_a": a["category"],
-                        "category_b": b["category"],
-                        "split_a": a["split"],
-                        "split_b": b["split"],
-                        "text_length": len(a["text"]),
-                        "note": (
-                            "same-split duplicate"
-                            if a["split"] == b["split"]
-                            else "cross-category duplicate"
-                        ),
-                    })
+        # Record pairs (capped at 100)
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
                 if len(dup_pairs) >= 100:
                     break
+                a, b = group[i], group[j]
+                dup_pairs.append({
+                    "doc_id_a":   a["doc_id"],
+                    "doc_id_b":   b["doc_id"],
+                    "category_a": a["category"],
+                    "category_b": b["category"],
+                    "text_length": len(a["text"]),
+                    "note": (
+                        "same-category duplicate"
+                        if a["category"] == b["category"]
+                        else "cross-category duplicate"
+                    ),
+                })
+            if len(dup_pairs) >= 100:
+                break
 
-    result.duplicate_count = len(unexpected_dup_docs)
+    result.duplicate_count = len(dup_docs)
     result.duplicate_pairs = dup_pairs
-    result.expected_twin_count = len(total_dup_docs) - len(unexpected_dup_docs)
+    result.expected_twin_count = 0   # no twin structure in new archive
 
     # ------------------------------------------------------------------
     # 3. Per-category breakdown (counts + lengths)
@@ -294,41 +264,33 @@ def analyse_dataset(
     for cat in CATEGORIES:
         if cat not in cat_docs:
             continue
-        cdocs = cat_docs[cat]
+        cdocs    = cat_docs[cat]
         clengths = [len(d["text"]) for d in cdocs]
-        csplit   = collections.Counter(d["split"] for d in cdocs)
 
-        # Unexpected duplicates within this category only.
-        # A same-category train/test pair with identical text is EXPECTED
-        # (by dataset design); we only flag extras beyond that expected pair.
-        cat_text_groups: Dict[int, List[dict]] = collections.defaultdict(list)
+        # Detect exact-text duplicates within this category
+        cat_hash: Dict[int, List[dict]] = collections.defaultdict(list)
         for d in cdocs:
-            cat_text_groups[hash(d["text"])].append(d)
+            cat_hash[hash(d["text"])].append(d)
         cat_dup_docs: set[int] = set()
-        for grp in cat_text_groups.values():
+        for grp in cat_hash.values():
             if len(grp) < 2:
                 continue
-            ref_text = grp[0]["text"]
-            grp = [d for d in grp if d["text"] == ref_text]
-            if len(grp) < 2:
-                continue
-            # Expected: exactly one train + one test with same text in same category
-            splits_in_grp = [d["split"] for d in grp]
-            if len(grp) == 2 and set(splits_in_grp) == {"train", "test"}:
-                continue  # this is the normal train/test twin – not a dup
-            cat_dup_docs.update(d["doc_id"] for d in grp)
+            ref = grp[0]["text"]
+            grp = [d for d in grp if d["text"] == ref]
+            if len(grp) >= 2:
+                cat_dup_docs.update(d["doc_id"] for d in grp)
 
         result.per_category.append(CategoryStats(
-            category          = cat,
-            label             = CATEGORIES.index(cat),
-            train_count       = csplit.get("train", 0),
-            test_count        = csplit.get("test", 0),
-            unstructured_count= csplit.get("unstructured", 0),
-            total_count       = len(cdocs),
-            avg_length        = round(sum(clengths) / len(clengths), 2),
-            min_length        = min(clengths),
-            max_length        = max(clengths),
-            duplicate_count   = len(cat_dup_docs),
+            category           = cat,
+            label              = CATEGORIES.index(cat),
+            train_count        = 0,   # split not assigned yet
+            test_count         = 0,   # split not assigned yet
+            unstructured_count = 0,
+            total_count        = len(cdocs),
+            avg_length         = round(sum(clengths) / len(clengths), 2),
+            min_length         = min(clengths),
+            max_length         = max(clengths),
+            duplicate_count    = len(cat_dup_docs),
         ))
 
     result.analysis_duration_s = round(time.perf_counter() - t0, 3)
@@ -403,27 +365,21 @@ def print_report(result: AnalysisResult) -> None:
     print(f"\n{'OVERALL STATISTICS':}")
     print(f"  {'1. Total documents':<38} {result.total_documents:>8,}")
     print(f"  {'2. Number of categories':<38} {result.num_categories:>8,}")
-    print(f"  {'4. Training documents':<38} {result.train_count:>8,}")
-    print(f"  {'5. Testing documents':<38} {result.test_count:>8,}")
-    if result.unstructured_count:
-        print(f"  {'   Unstructured documents':<38} {result.unstructured_count:>8,}")
+    print(f"  {'4. Train / Test split':<38} {'see notebook cell 4':>8}")
+    print(f"  {'   (80/20 via train_test_split)':<38}")
     print(f"  {'6. Average document length (chars)':<38} {result.avg_length:>8,.1f}")
     print(f"  {'7. Minimum document length (chars)':<38} {result.min_length:>8,}")
     print(f"  {'8. Maximum document length (chars)':<38} {result.max_length:>8,}")
     print(f"  {'9. Empty/null documents':<38} {result.empty_null_count:>8,}")
-    twin_note = ""
-    if result.expected_twin_count:
-        twin_note = f"  ({result.expected_twin_count:,} expected train/test twins excluded)"
-    print(f"  {'10.Unexpected duplicate documents':<38} {result.duplicate_count:>8,}{twin_note}")
+    print(f"  {'10.Duplicate documents':<38} {result.duplicate_count:>8,}")
 
     print(f"\n{'3. DOCUMENTS PER CATEGORY':}")
-    print(f"  {'Category':<35} {'Train':>7} {'Test':>7} {'Total':>7} "
-          f"{'Avg len':>9} {'Dups':>6}")
-    print(f"  {'-'*35} {'-'*7} {'-'*7} {'-'*7} {'-'*9} {'-'*6}")
+    print(f"  {'Category':<35} {'Total':>7} {'AvgLen':>9} {'Dups':>6}")
+    print(f"  {'-'*35} {'-'*7} {'-'*9} {'-'*6}")
     for cs in result.per_category:
         print(
-            f"  {cs.category:<35} {cs.train_count:>7,} {cs.test_count:>7,} "
-            f"{cs.total_count:>7,} {cs.avg_length:>9,.1f} {cs.duplicate_count:>6,}"
+            f"  {cs.category:<35} {cs.total_count:>7,} "
+            f"{cs.avg_length:>9,.1f} {cs.duplicate_count:>6,}"
         )
 
     print(f"\n  Analysis completed in {result.analysis_duration_s:.2f}s")
@@ -453,12 +409,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Directory to write dataset_stats.json and per_category_stats.csv",
     )
     p.add_argument(
-        "--include-unstructured",
-        action="store_true",
-        default=False,
-        help="Also analyse the ~1 600 header-less documents",
-    )
-    p.add_argument(
         "--no-save",
         action="store_true",
         default=False,
@@ -473,7 +423,6 @@ def main(argv: Optional[list] = None) -> AnalysisResult:
     print("Loading dataset …", flush=True)
     result = analyse_dataset(
         archive_path=args.archive,
-        include_unstructured=args.include_unstructured,
     )
 
     print_report(result)

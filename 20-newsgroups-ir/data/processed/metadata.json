@@ -1,16 +1,17 @@
 {
   "preprocessing_version": "1.0.0",
-  "generated_at": "2026-10-05T16:53:44.738648+00:00",
-  "archive_used": "D:\\Project-ir\\archive.zip",
-  "num_documents": 37588,
+  "generated_at": "2026-10-06T17:24:53.366285+00:00",
+  "archive_used": "D:\\IR_project\\IR_PROJECT\\20-newsgroups-ir\\twenty+newsgroups.zip",
+  "num_documents": 19961,
   "num_categories": 20,
-  "splits_included": [
-    "test",
-    "train"
-  ],
-  "include_unstructured": false,
-  "empty_clean_text_count": 64,
-  "avg_clean_tokens": 96.57,
+  "split_method": "sklearn.model_selection.train_test_split",
+  "split_params": {
+    "test_size": 0.2,
+    "random_state": 42,
+    "stratify": "label"
+  },
+  "empty_clean_text_count": 32,
+  "avg_clean_tokens": 96.56,
   "columns": [
     "doc_id",
     "text",
@@ -28,30 +29,30 @@
     "split": "category"
   },
   "split_counts": {
-    "test": 18794,
-    "train": 18794
+    "test": 3993,
+    "train": 15968
   },
   "category_counts": {
-    "alt.atheism": 1596,
-    "comp.graphics": 1942,
-    "comp.os.ms-windows.misc": 1960,
-    "comp.sys.ibm.pc.hardware": 1958,
-    "comp.sys.mac.hardware": 1914,
-    "comp.windows.x": 1956,
-    "misc.forsale": 1926,
-    "rec.autos": 1976,
-    "rec.motorcycles": 1986,
-    "rec.sport.baseball": 1986,
-    "rec.sport.hockey": 1996,
-    "sci.crypt": 1982,
-    "sci.electronics": 1962,
-    "sci.med": 1976,
-    "sci.space": 1972,
-    "soc.religion.christian": 1994,
-    "talk.politics.guns": 1820,
-    "talk.politics.mideast": 1880,
-    "talk.politics.misc": 1550,
-    "talk.religion.misc": 1256
+    "alt.atheism": 999,
+    "comp.graphics": 998,
+    "comp.os.ms-windows.misc": 992,
+    "comp.sys.ibm.pc.hardware": 998,
+    "comp.sys.mac.hardware": 996,
+    "comp.windows.x": 998,
+    "misc.forsale": 993,
+    "rec.autos": 999,
+    "rec.motorcycles": 997,
+    "rec.sport.baseball": 999,
+    "rec.sport.hockey": 1000,
+    "sci.crypt": 999,
+    "sci.electronics": 999,
+    "sci.med": 998,
+    "sci.space": 999,
+    "soc.religion.christian": 997,
+    "talk.politics.guns": 1000,
+    "talk.politics.mideast": 1000,
+    "talk.politics.misc": 1000,
+    "talk.religion.misc": 1000
   },
   "categories": [
     "alt.atheism",
@@ -76,6 +77,6 @@
     "talk.religion.misc"
   ],
   "parquet_file": "processed_documents.parquet",
-  "parquet_size_bytes": 51228071,
-  "build_duration_s": 76.72
+  "parquet_size_bytes": 30138590,
+  "build_duration_s": 41.03
 }

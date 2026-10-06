@@ -1,85 +1,71 @@
-# 20 Newsgroups — Processed Dataset
+# Processed Dataset
 
-> **This directory is generated automatically.**  Do NOT commit `processed_documents.parquet` to Git.
-> Only `metadata.json` and `README.md` are tracked.
-> To regenerate, run: `python src/build_dataset.py`
+This directory contains the shared processed dataset for the
+20 Newsgroups IR project.
 
 ## Files
 
-| File | In Git | Description |
-|---|---|---|
-| `processed_documents.parquet` | ❌ | Full processed corpus (~37 500 rows) |
-| `metadata.json` | ✅ | Dataset description and stats |
-| `README.md` | ✅ | This file |
+| File | Description |
+|------|-------------|
+| `processed_documents.parquet` | Full preprocessed corpus (Snappy-compressed Parquet) |
+| `metadata.json` | Dataset statistics and build parameters |
+| `README.md` | This file |
 
-## Quick-start (pandas)
+## Dataset Statistics
 
+| Stat | Value |
+|------|-------|
+| Total documents | 19,961 |
+| Training documents | 15,968 (~80%) |
+| Testing documents | 3,993 (~20%) |
+| Categories | 20 |
+| Avg clean tokens | 96.56 |
+| Generated at | 2026-10-06T17:24:53.366285+00:00 |
+
+## Split Method
+
+The train/test split is created by `build_dataset.py` using:
 ```python
-import pandas as pd
-
-df = pd.read_parquet('data/processed/processed_documents.parquet')
-print(df.shape)          # (~37500, 6)
-print(df.columns.tolist())
-# ['doc_id', 'text', 'clean_text', 'label', 'category', 'split']
+from sklearn.model_selection import train_test_split
+train_docs, test_docs = train_test_split(
+    processed,
+    test_size=0.20,
+    random_state=42,
+    stratify=labels,
+)
 ```
 
-## Quick-start (PyArrow)
+## Loading the Dataset
 
 ```python
-import pyarrow.parquet as pq
+import sys
+sys.path.insert(0, 'src')
+from data_loader import load_processed_dataset
 
-table = pq.read_table('data/processed/processed_documents.parquet')
-# Filter to train split only:
-import pyarrow.compute as pc
-train = table.filter(pc.equal(table['split'], 'train'))
+df = load_processed_dataset()
+train_df = df[df['split'] == 'train']
+test_df  = df[df['split'] == 'test']
 ```
 
-## Schema
+## Columns
 
 | Column | Type | Description |
-|---|---|---|
-| `doc_id` | int32 | Globally unique 0-based integer |
-| `text` | string | Raw document body (email headers stripped) |
-| `clean_text` | string | Preprocessed text: lowercase stemmed tokens |
-| `label` | int8 | Numeric class label 0–19 |
-| `category` | category | Newsgroup name e.g. `alt.atheism` |
-| `split` | category | `train` or `test` |
+|--------|------|-------------|
+| `doc_id` | int32 | Globally unique 0-based document ID |
+| `text` | string | Raw document body (headers stripped) |
+| `clean_text` | string | Preprocessed text (stemmed, stopwords removed) |
+| `label` | int8 | Integer category label (0–19) |
+| `category` | category | Newsgroup name |
+| `split` | category | `"train"` or `"test"` |
 
-## Dataset statistics
+## Important: No Data Leakage
 
-| Statistic | Value |
-|---|---|
-| Total documents | 37,588 |
-| Categories | 20 |
-| Train documents | 18,794 |
-| Test documents | 18,794 |
-| Empty clean_text | 64 |
-| Avg clean tokens | 96.57 |
-| Preprocessing version | `1.0.0` |
-| Generated at | 2026-10-05T16:53:44.738648+00:00 |
+The TF-IDF vectorizer (and any other data-dependent feature extractor)
+**must be fitted only on training documents**.  Always filter by split
+before building an index:
 
-## Preprocessing pipeline
-
-Implemented in `src/preprocessing.py`.  Steps applied in order:
-
-1. Residual header / metadata removal
-2. Lowercase
-3. Tokenisation (NLTK `word_tokenize`)
-4. Stopword removal (NLTK English)
-5. Stemming (Porter Stemmer)
-6. Drop non-alpha / length < 2 tokens
-
-## Reproducing the dataset
-
-```bash
-# From the 20-newsgroups-ir/ directory:
-python src/build_dataset.py
-
-# With a custom archive path:
-python src/build_dataset.py --archive /path/to/archive.zip
-
-# Verify an existing file without rebuilding:
-python src/build_dataset.py --verify-only
+```python
+from tfidf import build_tfidf
+train_df = df[df['split'] == 'train']
+searcher = build_tfidf(train_df)  # fit on train only
 ```
-
-The `NEWSGROUPS_ARCHIVE_PATH` environment variable can also be set.

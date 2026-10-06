@@ -11,15 +11,27 @@ Overview
 Implements TF-IDF document indexing and cosine-similarity vector search
 over the preprocessed 20 Newsgroups corpus.
 
-Pipeline
---------
-1. Clean documents (preprocessed via src/preprocessing.py)
-2. Fit sklearn TfidfVectorizer on corpus
-3. Generate sparse TF-IDF document matrix
-4. Preprocess incoming queries using the SAME preprocessing pipeline
-5. Transform query to TF-IDF query vector
-6. Compute cosine similarity against document matrix
-7. Rank and return top-k matching results
+Pipeline (correct order – no data leakage)
+-------------------------------------------
+1. Load the processed dataset.
+2. Filter to TRAINING documents only (split == 'train').
+3. Fit TfidfVectorizer on the TRAINING corpus only.
+4. Build sparse TF-IDF document matrix from training documents.
+5. Preprocess incoming queries using the SAME preprocessing pipeline.
+6. Transform query to TF-IDF query vector (using already-fitted vectorizer).
+7. Compute cosine similarity against the training document matrix.
+8. Rank and return top-k matching results.
+
+Usage Example (no leakage)
+--------------------------
+    df          = load_processed_dataset()
+    train_df    = df[df['split'] == 'train']   # fit on train only
+    searcher    = build_tfidf(train_df)         # vectorizer fitted here
+    results     = searcher.search("space exploration", top_k=10)
+
+    # Test documents are transformed with the already-fitted vectorizer:
+    test_df     = df[df['split'] == 'test']
+    test_vec    = searcher.vectorizer.transform(test_df['clean_text'].tolist())
 
 Public API
 ----------
@@ -252,14 +264,35 @@ def build_tfidf(
     """
     Build a TF-IDF retrieval index from preprocessed documents.
 
-    Stores the built searcher instance globally so subsequent search_tfidf()
-    calls use it automatically.
+    IMPORTANT – No Data Leakage
+    ---------------------------
+    Pass ONLY training documents to this function.  The TfidfVectorizer is
+    fitted (i.e., the vocabulary and IDF weights are learned) exclusively
+    from the documents supplied here.  Test documents must NOT be included
+    during fitting.
+
+    Correct usage::
+
+        df       = load_processed_dataset()
+        train_df = df[df['split'] == 'train']   # ← training docs only
+        searcher = build_tfidf(train_df)         # vectorizer fitted here
+
+    Test documents are later transformed with the already-fitted vectorizer::
+
+        test_df  = df[df['split'] == 'test']
+        test_vec = searcher.vectorizer.transform(test_df['clean_text'].tolist())
+
+    If ``documents`` is None, this function auto-loads the processed dataset
+    and **filters to training documents only** before fitting, so the default
+    path is always leakage-free.
 
     Parameters
     ----------
     documents : list of dict, iterable of dict, or pandas.DataFrame, optional
         Document records containing 'doc_id' and 'clean_text' (or 'text').
-        If None, automatically loads the common processed dataset parquet artifact.
+        Should contain ONLY training documents (split == 'train').
+        If None, automatically loads the processed dataset and filters to
+        training documents.
     sublinear_tf : bool, default True
         Apply sublinear scaling 1 + log(tf).
     min_df : int or float, default 1
@@ -275,11 +308,14 @@ def build_tfidf(
     -------
     TFIDFSearcher
         Fitted TF-IDF searcher ready for queries.
+        The vectorizer inside is fitted on training documents only.
     """
     global _GLOBAL_SEARCHER
 
     if documents is None:
-        documents = load_processed_dataset()
+        # Auto-load and filter to training documents to avoid leakage.
+        full_df = load_processed_dataset()
+        documents = full_df[full_df["split"] == "train"]
 
     # Handle pandas DataFrame input
     if hasattr(documents, "to_dict"):
@@ -314,6 +350,7 @@ def build_tfidf(
         norm=norm,
     )
 
+    # fit_transform on TRAINING documents only
     doc_matrix = vectorizer.fit_transform(corpus_texts)
 
     stored_docs = records if store_documents else None
@@ -363,9 +400,11 @@ def search_tfidf(
         if documents is not None:
             target_searcher = build_tfidf(documents)
         else:
-            # Auto-load processed dataset if available
+            # Auto-load processed dataset and filter to training docs only.
+            # The vectorizer must NOT be fitted on test documents.
             df = load_processed_dataset()
-            target_searcher = build_tfidf(df)
+            train_df = df[df["split"] == "train"]
+            target_searcher = build_tfidf(train_df)
 
     return target_searcher.search(query, top_k=top_k)
 

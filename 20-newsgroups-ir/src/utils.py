@@ -49,14 +49,13 @@ PROCESSED_DATA_DIR: Path = (
 # Dataset archive
 # ---------------------------------------------------------------------------
 
-#: Path to ``archive.zip`` (raw dataset – NOT in Git).
+#: Path to ``twenty+newsgroups.zip`` (raw dataset – NOT in Git).
 _ARCHIVE_ENV: str | None = os.environ.get("NEWSGROUPS_ARCHIVE_PATH")
-# PROJECT_ROOT = …/20-newsgroups-ir/  → parents[0] = IR_PROJECT/
-#                                      → parents[1] = d:\Project-ir\
+# PROJECT_ROOT = …/20-newsgroups-ir/  → the zip lives inside this directory.
 ARCHIVE_PATH: Path = (
     Path(_ARCHIVE_ENV)
     if _ARCHIVE_ENV
-    else PROJECT_ROOT.parents[1] / "archive.zip"
+    else PROJECT_ROOT / "twenty+newsgroups.zip"
 )
 
 # ---------------------------------------------------------------------------

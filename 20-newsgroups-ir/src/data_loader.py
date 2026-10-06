@@ -8,31 +8,41 @@ Module : Dataset Loading (own component)
 
 Overview
 --------
-Loads the 20 Newsgroups corpus from the local ``archive.zip`` file.
-Each of the 20 category ``.txt`` files inside the archive has two
-structured sections separated by a header-case convention:
+Loads the 20 Newsgroups corpus from the local ``twenty+newsgroups.zip`` file.
+Inside that ZIP is ``20_newsgroups.tar.gz``, which unpacks to a directory
+tree of the form::
 
-* **Train** docs  – header pair ``Newsgroup: <cat>`` / ``document_id: <n>``
-  (lowercase ``d``)
-* **Test** docs   – header pair ``Newsgroup: <cat>`` / ``Document_id: <n>``
-  (uppercase ``D``)
-* **Unstructured** docs – ``From:`` boundary only, no ``Newsgroup:`` /
-  ``document_id:`` header; assigned ``split="unstructured"`` and a
-  generated doc_id.
+    20_newsgroups/
+        alt.atheism/
+            53366
+            53367
+            ...
+        comp.graphics/
+            ...
 
-The public API exposes three functions:
+Each leaf file is a single raw news article (RFC-2822 formatted).
 
-* :func:`load_dataset`       – full corpus → ``list[dict]``
-* :func:`load_split`         – one split  → ``list[dict]``
-* :func:`load_dataframe`     – full corpus → ``pandas.DataFrame``
+The full dataset contains ~19,997 documents across 20 categories.
+No pre-assigned train/test split exists in the archive.  The 80/20
+stratified split is created by ``build_dataset.py`` using
+``sklearn.model_selection.train_test_split``.
 
-Each record has the keys:
+The public API exposes:
 
-    doc_id   (int)  – globally stable integer, unique across the whole corpus
+* :func:`load_dataset`          – full corpus → ``list[dict]``
+* :func:`load_dataframe`        – full corpus → ``pandas.DataFrame``
+* :func:`load_processed_dataset`– loads the pre-built parquet artifact
+* :func:`dataset_info`          – fast metadata scan (no full text load)
+
+Each record returned by ``load_dataset`` has the keys:
+
+    doc_id   (int)  – globally stable 0-based integer, unique in the list
     text     (str)  – raw document body (headers stripped by default)
-    label    (int)  – zero-based integer label (same ordering as categories)
+    label    (int)  – zero-based integer label (same ordering as CATEGORIES)
     category (str)  – newsgroup name, e.g. ``"alt.atheism"``
-    split    (str)  – ``"train"`` | ``"test"`` | ``"unstructured"``
+
+Note: the ``split`` key (``"train"`` / ``"test"``) is NOT assigned here.
+It is computed later by ``build_dataset.py`` using ``train_test_split``.
 """
 
 from __future__ import annotations
@@ -40,17 +50,21 @@ from __future__ import annotations
 import io
 import os
 import re
+import tarfile
 import zipfile
 from pathlib import Path
 from typing import Iterator, List, Optional
 
 # ---------------------------------------------------------------------------
-# Default archive location – can be overridden via environment variable
-# NEWSGROUPS_ARCHIVE_PATH or by passing ``archive_path`` explicitly.
+# Default archive location – can be overridden via NEWSGROUPS_ARCHIVE_PATH
+# or by passing ``archive_path`` explicitly.
 # ---------------------------------------------------------------------------
-_DEFAULT_ARCHIVE = Path(__file__).resolve().parents[3] / "archive.zip"
+_DEFAULT_ARCHIVE = Path(__file__).resolve().parents[1] / "twenty+newsgroups.zip"
 
-# Ordered list of the 20 newsgroup categories (matches the .txt filenames).
+# Name of the tar.gz member inside the ZIP that contains the full dataset.
+_FULL_DATASET_TARBALL = "20_newsgroups.tar.gz"
+
+# Ordered list of the 20 newsgroup categories (matches subdirectory names).
 CATEGORIES: List[str] = [
     "alt.atheism",
     "comp.graphics",
@@ -74,28 +88,13 @@ CATEGORIES: List[str] = [
     "talk.religion.misc",
 ]
 
-# Regex that matches the structured doc header block at the START of a document.
-# Captures:
-#   group 1 – category name   (from ``Newsgroup:`` line)
-#   group 2 – document id     (from ``document_id:`` or ``Document_id:`` line)
-#   group 3 – split indicator (``'d'`` for train, ``'D'`` for test)
-_STRUCTURED_HEADER_RE = re.compile(
-    r"^Newsgroup:\s*(.+?)\s*\n"
-    r"(d|D)ocument_id:\s*(\d+)\s*\n",
-    re.MULTILINE,
-)
-
-# Regex that detects a bare ``From:`` line used as a document boundary in
-# the unstructured (header-less) sections of some category files.
-_BARE_FROM_RE = re.compile(r"^From: ", re.MULTILINE)
-
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
 def _resolve_archive(archive_path: Optional[str | Path] = None) -> Path:
-    """Return the resolved path to archive.zip, raising a clear error if missing."""
+    """Return the resolved path to the archive ZIP, raising a clear error if missing."""
     if archive_path is not None:
         path = Path(archive_path)
     else:
@@ -106,143 +105,46 @@ def _resolve_archive(archive_path: Optional[str | Path] = None) -> Path:
         raise FileNotFoundError(
             f"Dataset archive not found at '{path}'.\n"
             "Set the NEWSGROUPS_ARCHIVE_PATH environment variable or pass "
-            "`archive_path=` explicitly to load_dataset()."
+            "`archive_path=` explicitly to load_dataset().\n"
+            "Expected: twenty+newsgroups.zip (containing 20_newsgroups.tar.gz)"
         )
     return path
 
 
-def _extract_body(raw_block: str, strip_headers: bool) -> str:
+def _extract_body(raw_article: str, strip_headers: bool) -> str:
     """
-    Return the text body of a document block.
+    Return the text body of a raw news article.
 
-    If ``strip_headers`` is True the email-style header lines at the top of
-    the block (``From:``, ``Subject:``, ``Newsgroup:``, ``document_id:``,
-    ``Lines:``, ``Date:``, ``Organization:``, ``Message-ID:``, ``References:``,
-    ``NNTP-Posting-Host:``, ``X-*:``, etc.) are removed, leaving only the
-    prose body.  An empty string is returned if nothing remains.
+    If ``strip_headers`` is True, the RFC-2822 header lines at the top of
+    the article (``From:``, ``Newsgroups:``, ``Subject:``, ``Date:``,
+    ``Message-ID:``, ``References:``, ``Lines:``, ``Organization:``,
+    ``NNTP-Posting-Host:``, ``X-*:``, ``Path:``, etc.) are removed,
+    leaving only the prose body.  The blank separator line between headers
+    and body is also consumed.  An empty string is returned if nothing
+    remains after stripping.
     """
     if not strip_headers:
-        return raw_block.strip()
+        return raw_article.strip()
 
-    lines = raw_block.split("\n")
-    # Skip contiguous header lines at the top (key: value pattern) and the
-    # blank separator line that follows them in RFC-2822 style.
+    lines = raw_article.split("\n")
     body_lines: List[str] = []
     in_header = True
     for line in lines:
         if in_header:
-            # A blank line ends the header section.
             if line.strip() == "":
+                # Blank line terminates the header block.
                 in_header = False
             elif re.match(r"^[\w\-]+:", line):
-                # Header line – skip it.
+                # Standard header line – skip.
                 continue
             else:
-                # Non-header content while still in "header" zone means the
-                # header block was very short / absent; start collecting now.
+                # Non-header line before the blank separator → body starts now.
                 in_header = False
                 body_lines.append(line)
         else:
             body_lines.append(line)
 
     return "\n".join(body_lines).strip()
-
-
-def _iter_structured_docs(
-    content: str,
-    label: int,
-    strip_headers: bool,
-    doc_id_counter: list,
-) -> Iterator[dict]:
-    """
-    Yield document dicts from the structured (Newsgroup: / document_id:) sections.
-
-    ``doc_id_counter`` is a single-element list used as a mutable integer so
-    the counter persists across calls without needing a class.
-    """
-    # Split the file content on each structured header block.
-    # re.split with a capturing group keeps the captured text in the result list.
-    parts = _STRUCTURED_HEADER_RE.split(content)
-    # parts pattern: [pre_text, cat, d_or_D, raw_id, body, cat, d_or_D, raw_id, body, ...]
-    # Index 0 is text before the first match (may contain unstructured docs).
-    # After that every group of 4 is: category, case_indicator, raw_id, body_text.
-
-    i = 1  # skip pre_text (index 0)
-    while i + 3 < len(parts):
-        category_name = parts[i].strip()
-        case_indicator = parts[i + 1]   # 'd' = train, 'D' = test
-        raw_id = parts[i + 2]
-        body_raw = parts[i + 3]
-
-        split = "train" if case_indicator == "d" else "test"
-        text = _extract_body(body_raw, strip_headers)
-
-        if text:  # skip empty-body documents
-            yield {
-                "doc_id": doc_id_counter[0],
-                "text": text,
-                "label": label,
-                "category": category_name,
-                "split": split,
-                "_source_doc_id": int(raw_id),  # original ID from file (for debugging)
-            }
-            doc_id_counter[0] += 1
-
-        i += 4
-
-
-def _iter_unstructured_docs(
-    content: str,
-    category: str,
-    label: int,
-    strip_headers: bool,
-    doc_id_counter: list,
-) -> Iterator[dict]:
-    """
-    Yield document dicts from the unstructured (``From:``-delimited) sections.
-
-    Only blocks that have NO preceding ``Newsgroup:`` header (within 3 lines)
-    are treated as truly unstructured; the rest belong to structured sections
-    and are handled by ``_iter_structured_docs``.
-    """
-    lines = content.split("\n")
-    # Collect line indices of structured headers so we can exclude them.
-    structured_lines: set[int] = set()
-    for m in re.finditer(r"^(?:N|n)ewsgroup:", content, re.MULTILINE):
-        line_no = content[: m.start()].count("\n")
-        # Mark this line and the next 2 as belonging to a structured block.
-        for offset in range(3):
-            structured_lines.add(line_no + offset)
-
-    # Find bare ``From:`` line indices that are NOT part of a structured block.
-    from_indices: List[int] = []
-    for m in re.finditer(_BARE_FROM_RE, content):
-        line_no = content[: m.start()].count("\n")
-        # Check if any of the 3 lines before this From: is a doc_id: line.
-        context_start = max(0, line_no - 3)
-        context = "\n".join(lines[context_start:line_no])
-        if not re.search(r"(?:d|D)ocument_id:", context):
-            from_indices.append(m.start())
-
-    if not from_indices:
-        return
-
-    # Reconstruct document blocks between consecutive bare From: positions.
-    for idx, start_pos in enumerate(from_indices):
-        end_pos = from_indices[idx + 1] if idx + 1 < len(from_indices) else len(content)
-        block = content[start_pos:end_pos]
-        text = _extract_body(block, strip_headers)
-
-        if text:
-            yield {
-                "doc_id": doc_id_counter[0],
-                "text": text,
-                "label": label,
-                "category": category,
-                "split": "unstructured",
-                "_source_doc_id": None,
-            }
-            doc_id_counter[0] += 1
 
 
 # ---------------------------------------------------------------------------
@@ -253,137 +155,100 @@ def load_dataset(
     archive_path: Optional[str | Path] = None,
     *,
     categories: Optional[List[str]] = None,
-    splits: Optional[List[str]] = None,
     strip_headers: bool = True,
-    include_unstructured: bool = False,
 ) -> List[dict]:
     """
-    Load the 20 Newsgroups corpus from the local ZIP archive.
+    Load the 20 Newsgroups corpus from ``twenty+newsgroups.zip``.
+
+    Reads ``20_newsgroups.tar.gz`` inside the ZIP, iterates over the
+    directory-per-document layout, and returns one dict per document.
 
     Parameters
     ----------
     archive_path : str or Path, optional
-        Path to ``archive.zip``.  Defaults to the sibling directory of the
-        repo root, or the ``NEWSGROUPS_ARCHIVE_PATH`` environment variable.
+        Path to ``twenty+newsgroups.zip``.  Defaults to the file located
+        in the ``20-newsgroups-ir/`` project directory, or to the path
+        given by the ``NEWSGROUPS_ARCHIVE_PATH`` environment variable.
     categories : list of str, optional
         Subset of category names to load.  ``None`` loads all 20.
-    splits : list of str, optional
-        Subset of splits to include: any combination of ``"train"``,
-        ``"test"``, ``"unstructured"``.  ``None`` loads ``train`` and ``test``
-        (excludes unstructured by default; use ``include_unstructured=True``
-        as a shorthand).
     strip_headers : bool, default True
-        Strip email-style header lines (From, Subject, etc.) from the body.
-    include_unstructured : bool, default False
-        Convenience flag to include the small set of ``"unstructured"`` docs
-        (those without ``Newsgroup:``/``document_id:`` headers).  Ignored if
-        ``splits`` is provided explicitly.
+        Strip RFC-2822 header lines (From, Subject, Newsgroups, etc.) from
+        each article, leaving only the prose body.
 
     Returns
     -------
     list of dict
-        Each dict has keys: ``doc_id``, ``text``, ``label``, ``category``,
-        ``split``.  ``doc_id`` is a globally stable 0-based integer that is
-        unique within the returned list.
+        Each dict has keys: ``doc_id``, ``text``, ``label``, ``category``.
+        ``doc_id`` is a 0-based integer, unique and contiguous in the
+        returned list (re-indexed at the end so it is always 0-based).
+
+    Notes
+    -----
+    * No ``split`` key is present – the train/test split is assigned by
+      ``build_dataset.py`` using ``sklearn.model_selection.train_test_split``.
+    * Documents with an empty body after header stripping are silently skipped.
 
     Examples
     --------
     >>> docs = load_dataset()
     >>> len(docs)
-    37656
+    19997          # may vary slightly by archive version
     >>> docs[0].keys()
-    dict_keys(['doc_id', 'text', 'label', 'category', 'split'])
+    dict_keys(['doc_id', 'text', 'label', 'category'])
     """
     archive = _resolve_archive(archive_path)
 
-    target_categories = categories if categories is not None else CATEGORIES
-    # Validate category names.
-    unknown = set(target_categories) - set(CATEGORIES)
+    target_categories = set(categories) if categories is not None else set(CATEGORIES)
+    unknown = target_categories - set(CATEGORIES)
     if unknown:
         raise ValueError(f"Unknown categories: {unknown}. Valid choices: {CATEGORIES}")
 
-    if splits is not None:
-        target_splits: set[str] = set(splits)
-    else:
-        target_splits = {"train", "test"}
-        if include_unstructured:
-            target_splits.add("unstructured")
-
     records: List[dict] = []
-    # Shared counter so doc_ids are globally unique across categories.
-    doc_id_counter = [0]
+    doc_id_counter = 0
 
-    with zipfile.ZipFile(archive, "r") as zf:
-        available_files = {name for name in zf.namelist()}
+    with zipfile.ZipFile(archive, "r") as outer_zip:
+        # Open the inner tarball in streaming mode (no temp disk extraction).
+        with outer_zip.open(_FULL_DATASET_TARBALL) as tar_fh:
+            tar_bytes = tar_fh.read()
 
-        for category in target_categories:
-            filename = f"{category}.txt"
-            if filename not in available_files:
-                # Gracefully skip missing categories instead of crashing.
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            # We only want leaf files: 20_newsgroups/<category>/<article_id>
+            parts = member.name.split("/")
+            if len(parts) != 3 or not parts[2]:
+                continue  # skip directory entries and top-level tar root
+
+            category = parts[1]
+            if category not in target_categories:
                 continue
 
             label = CATEGORIES.index(category)
 
-            with zf.open(filename) as fh:
-                content = fh.read().decode("utf-8", errors="replace")
+            fh = tar.extractfile(member)
+            if fh is None:
+                continue
 
-            # --- Structured docs (train + test) ---
-            for doc in _iter_structured_docs(
-                content, label, strip_headers, doc_id_counter
-            ):
-                if doc["split"] in target_splits:
-                    records.append(doc)
-                else:
-                    # Still advance the counter so doc_ids stay stable
-                    # regardless of which splits are requested.
-                    doc_id_counter[0] -= 1  # undo the increment
-                    # We do NOT want to skip the counter entirely;
-                    # re-use this slot for the next accepted doc.
+            raw = fh.read().decode("utf-8", errors="replace")
+            text = _extract_body(raw, strip_headers)
 
-            # --- Unstructured docs ---
-            if "unstructured" in target_splits:
-                for doc in _iter_unstructured_docs(
-                    content, category, label, strip_headers, doc_id_counter
-                ):
-                    records.append(doc)
+            if not text:
+                continue  # skip empty-body articles
 
-    # Re-index doc_ids to be contiguous 0-based integers in the final list.
+            records.append(
+                {
+                    "doc_id": doc_id_counter,
+                    "text": text,
+                    "label": label,
+                    "category": category,
+                }
+            )
+            doc_id_counter += 1
+
+    # Re-index doc_ids to a contiguous 0-based range in the final list.
     for new_id, record in enumerate(records):
         record["doc_id"] = new_id
 
-    # Remove the internal debugging key before returning.
-    for record in records:
-        record.pop("_source_doc_id", None)
-
     return records
-
-
-def load_split(
-    split: str,
-    archive_path: Optional[str | Path] = None,
-    **kwargs,
-) -> List[dict]:
-    """
-    Convenience wrapper to load a single split.
-
-    Parameters
-    ----------
-    split : str
-        One of ``"train"``, ``"test"``, or ``"unstructured"``.
-    archive_path : str or Path, optional
-        Passed through to :func:`load_dataset`.
-    **kwargs
-        Any other keyword argument accepted by :func:`load_dataset`.
-
-    Returns
-    -------
-    list of dict
-    """
-    if split not in {"train", "test", "unstructured"}:
-        raise ValueError(
-            f"Invalid split '{split}'. Choose from 'train', 'test', 'unstructured'."
-        )
-    return load_dataset(archive_path=archive_path, splits=[split], **kwargs)
 
 
 def load_dataframe(
@@ -393,7 +258,7 @@ def load_dataframe(
     """
     Load the corpus as a ``pandas.DataFrame``.
 
-    Columns: ``doc_id``, ``text``, ``label``, ``category``, ``split``.
+    Columns: ``doc_id``, ``text``, ``label``, ``category``.
 
     Parameters
     ----------
@@ -405,11 +270,6 @@ def load_dataframe(
     Returns
     -------
     pandas.DataFrame
-
-    Raises
-    ------
-    ImportError
-        If ``pandas`` is not installed.
     """
     try:
         import pandas as pd
@@ -420,7 +280,7 @@ def load_dataframe(
         ) from exc
 
     records = load_dataset(archive_path=archive_path, **kwargs)
-    df = pd.DataFrame(records, columns=["doc_id", "text", "label", "category", "split"])
+    df = pd.DataFrame(records, columns=["doc_id", "text", "label", "category"])
     return df
 
 
@@ -433,7 +293,8 @@ def load_processed_dataset(parquet_path: Optional[str | Path] = None) -> "pd.Dat
     Parameters
     ----------
     parquet_path : str or Path, optional
-        Path to ``processed_documents.parquet``. Defaults to ``utils.PARQUET_FILE``.
+        Path to ``processed_documents.parquet``.
+        Defaults to ``utils.PARQUET_FILE``.
 
     Returns
     -------
@@ -465,46 +326,38 @@ def dataset_info(archive_path: Optional[str | Path] = None) -> dict:
 
     Keys
     ----
-    archive_path   : resolved path to the ZIP file
-    num_categories : number of categories found in the archive
-    categories     : list of category names
-    counts         : dict mapping category → {train, test, unstructured, total}
-    totals         : dict with aggregate train / test / unstructured / total counts
+    archive_path    : resolved path to the ZIP file
+    num_categories  : number of categories found in the archive
+    categories      : list of category names present
+    counts          : dict mapping category → document count
+    total_documents : total number of leaf documents across all categories
+
+    Notes
+    -----
+    This is a fast scan that only inspects tar member names, not file
+    contents.  Counts reflect the raw file count (before empty-body
+    filtering applied during full :func:`load_dataset` calls).
     """
     archive = _resolve_archive(archive_path)
-    counts: dict[str, dict] = {}
+    counts: dict[str, int] = {}
 
-    with zipfile.ZipFile(archive, "r") as zf:
-        for category in CATEGORIES:
-            filename = f"{category}.txt"
-            if filename not in {e.filename for e in zf.infolist()}:
-                continue
-            with zf.open(filename) as fh:
-                content = fh.read().decode("utf-8", errors="replace")
+    with zipfile.ZipFile(archive, "r") as outer_zip:
+        with outer_zip.open(_FULL_DATASET_TARBALL) as tar_fh:
+            tar_bytes = tar_fh.read()
 
-            train_n = len(re.findall(r"^document_id:", content, re.MULTILINE))
-            test_n = len(re.findall(r"^Document_id:", content, re.MULTILINE))
-            from_n = len(re.findall(r"^From: ", content, re.MULTILINE))
-            unstruct_n = from_n - train_n - test_n
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            parts = member.name.split("/")
+            if len(parts) == 3 and parts[2]:
+                cat = parts[1]
+                counts[cat] = counts.get(cat, 0) + 1
 
-            counts[category] = {
-                "train": train_n,
-                "test": test_n,
-                "unstructured": max(unstruct_n, 0),
-                "total": from_n,
-            }
-
-    totals = {
-        "train": sum(v["train"] for v in counts.values()),
-        "test": sum(v["test"] for v in counts.values()),
-        "unstructured": sum(v["unstructured"] for v in counts.values()),
-        "total": sum(v["total"] for v in counts.values()),
-    }
+    categories_found = [c for c in CATEGORIES if c in counts]
 
     return {
         "archive_path": str(archive),
-        "num_categories": len(counts),
-        "categories": list(counts.keys()),
-        "counts": counts,
-        "totals": totals,
+        "num_categories": len(categories_found),
+        "categories": categories_found,
+        "counts": {c: counts.get(c, 0) for c in categories_found},
+        "total_documents": sum(counts.get(c, 0) for c in categories_found),
     }
